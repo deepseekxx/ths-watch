@@ -1,21 +1,16 @@
 #!/usr/bin/env node
 /**
- * 同花顺「重生之散户一哥」发帖监控 —— 云端版（GitHub Actions 用）
+ * 同花顺博主发帖监控 —— 云端版（GitHub Actions 用）
  *
- * 与本地版区别：
- *   - 不弹 Windows 通知，只推送到手机（ntfy / Bark / 企业微信 / PushPlus / Server酱 / 飞书）
- *   - 每次运行都在全新机器上，所以每次都重新用 Chrome 取一次同花顺令牌
- *   - 已读记录存在 state.json 里，由 workflow 的 actions/cache 负责缓存
+ * 支持同时监控多个博主：改下面的 TARGETS 数组即可（name 随便写，code 是主页链接里 user_code= 后面那串）。
  *
- * 环境变量（配一个就够）：
- *   NTFY_URL         安卓/鸿蒙首选，如 https://ntfy.sh/my_topic_abc
- *   BARK_URL         iPhone，如 https://api.day.app/xxxx
- *   PUSHPLUS_TOKEN   微信推送
+ * 环境变量（配一个推送渠道就够）：
+ *   PUSHPLUS_TOKEN   微信推送（当前在用）
+ *   NTFY_URL         安卓/鸿蒙 ntfy
+ *   BARK_URL         iPhone Bark
  *   WECOM_WEBHOOK    企业微信群机器人
  *   SERVERCHAN_KEY   Server酱
  *   FEISHU_WEBHOOK   飞书群机器人
- *   USER_CODE        可选，默认 1179giyc4jr06d6785e69e
- *   NAME             可选，默认 重生之散户一哥
  *   CHROME_PATH      可选，Chrome 可执行文件路径
  */
 'use strict';
@@ -25,17 +20,21 @@ const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
 
-const ROOT = __dirname;
-// 已读记录放在仓库根目录，和 workflow 里 actions/cache 的 path 保持一致
-const STATE_PATH = path.resolve(__dirname, '..', 'state.json');
 const API = 'https://t.10jqka.com.cn/user_center/open/api/content/v2/get_by_uid';
+const STATE_PATH = path.resolve(__dirname, '..', 'state.json');
 
-const USER_CODE = process.env.USER_CODE || '1179giyc4jr06d6785e69e';
-const NAME = process.env.NAME || '重生之散户一哥';
+/* ======================= 要监控的博主（改这里） ======================= */
+const TARGETS = [
+  { name: '重生之散户一哥', code: '1179giyc4jr06d6785e69e' },
+  { name: 'G界红猫', code: '' }, // 待填 user_code
+  { name: '77超帅', code: '' }, // 待填 user_code
+].filter((t) => t.code);
+
+/* ============================== 配置 ============================== */
+const PUSHPLUS = (process.env.PUSHPLUS_TOKEN || '').trim();
 const NTFY_URL = (process.env.NTFY_URL || '').trim();
 const BARK_URL = (process.env.BARK_URL || '').trim();
 const WECOM = (process.env.WECOM_WEBHOOK || '').trim();
-const PUSHPLUS = (process.env.PUSHPLUS_TOKEN || '').trim();
 const SERVERCHAN = (process.env.SERVERCHAN_KEY || '').trim();
 const FEISHU = (process.env.FEISHU_WEBHOOK || '').trim();
 
@@ -60,12 +59,25 @@ function log(msg) {
   console.log(`[${nowIso()}] ${msg}`);
 }
 
+/* ============================== 工具 ============================== */
+
 function loadState() {
+  let s = {};
   try {
-    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+    s = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
   } catch {
-    return {};
+    s = {};
   }
+  // 兼容旧版单博主格式
+  if (Array.isArray(s.seenIds) && !s.targets) {
+    const first = TARGETS[0];
+    s = {
+      version: 2,
+      targets: first ? { [first.code]: { seenIds: s.seenIds, failCount: 0 } } : {},
+    };
+  }
+  if (!s.targets) s.targets = {};
+  return s;
 }
 
 function saveState(s) {
@@ -88,10 +100,9 @@ function stripHtml(s) {
 
 function fmtTime(ms) {
   // 统一按北京时间显示
-  const d = new Date(Number(ms) || Date.now());
-  const bj = new Date(d.getTime() + 8 * 3600 * 1000);
+  const d = new Date((Number(ms) || Date.now()) + 8 * 3600 * 1000);
   const p = (n) => String(n).padStart(2, '0');
-  return `${bj.getUTCMonth() + 1}-${p(bj.getUTCDate())} ${p(bj.getUTCHours())}:${p(bj.getUTCMinutes())}`;
+  return `${d.getUTCMonth() + 1}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
 }
 
 function findChrome() {
@@ -113,7 +124,8 @@ async function httpJson(url, method = 'GET') {
   }
 }
 
-/** 用无头 Chrome 打开一次同花顺页面，读出风控令牌 */
+/* ======================= 用无头 Chrome 取风控令牌 ======================= */
+
 async function getCookie() {
   const chrome = findChrome();
   if (!chrome) throw new Error('找不到 Chrome，无法获取同花顺令牌');
@@ -149,7 +161,9 @@ async function getCookie() {
     }
     if (!version || !version.webSocketDebuggerUrl) throw new Error('Chrome 调试端口未就绪');
 
-    const pageUrl = `https://t.10jqka.com.cn/lgt/user_page/?user_code=${encodeURIComponent(USER_CODE)}`;
+    const pageUrl = `https://t.10jqka.com.cn/lgt/user_page/?user_code=${encodeURIComponent(
+      TARGETS[0].code,
+    )}`;
     const tab = await httpJson(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(pageUrl)}`, 'PUT');
     if (!tab || !tab.webSocketDebuggerUrl) throw new Error('无法新建标签页');
 
@@ -198,18 +212,20 @@ async function getCookie() {
   }
 }
 
-async function fetchPosts(cookie) {
+/* ============================== 拉帖子 ============================== */
+
+async function fetchPosts(cookie, target) {
   const res = await fetch(API, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/plain, */*',
       Cookie: cookie,
-      Referer: `https://t.10jqka.com.cn/lgt/user_page/?user_code=${encodeURIComponent(USER_CODE)}`,
+      Referer: `https://t.10jqka.com.cn/lgt/user_page/?user_code=${encodeURIComponent(target.code)}`,
       Origin: 'https://t.10jqka.com.cn',
       'User-Agent': UA,
     },
-    body: JSON.stringify({ user_code: USER_CODE }),
+    body: JSON.stringify({ user_code: target.code }),
   });
   const text = await res.text();
   if (res.status === 403) throw new Error('接口返回 403（令牌被拒或被风控）');
@@ -236,9 +252,8 @@ async function fetchPosts(cookie) {
     .sort((a, b) => a.ctime - b.ctime);
 }
 
-/* ------------------------------ 推送渠道 ------------------------------ */
+/* ============================== 推送渠道 ============================== */
 
-/** ntfy：安卓/鸿蒙首选，免费、无需注册，点击通知直达原帖 */
 async function pushNtfy(title, body, link) {
   if (!NTFY_URL) return false;
   try {
@@ -249,17 +264,10 @@ async function pushNtfy(title, body, link) {
     const res = await fetch(u.toString(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        topic,
-        title,
-        message: body,
-        click: link,
-        priority: 4,
-        tags: ['chart_with_upwards_trend'],
-      }),
+      body: JSON.stringify({ topic, title, message: body, click: link, priority: 4 }),
     });
     const txt = await res.text();
-    log(`ntfy 响应 ${res.status}: ${txt.slice(0, 150)}`);
+    log(`ntfy 响应 ${res.status}: ${txt.slice(0, 120)}`);
     return res.ok;
   } catch (e) {
     log('ntfy 推送失败: ' + (e && e.message));
@@ -267,7 +275,6 @@ async function pushNtfy(title, body, link) {
   }
 }
 
-/** Bark：iPhone 专用 */
 async function pushBark(title, body, link) {
   if (!BARK_URL) return false;
   const root = BARK_URL.replace(/\/+$/, '');
@@ -277,7 +284,7 @@ async function pushBark(title, body, link) {
   try {
     const res = await fetch(url);
     const txt = await res.text();
-    log(`Bark 响应 ${res.status}: ${txt.slice(0, 200)}`);
+    log(`Bark 响应 ${res.status}: ${txt.slice(0, 150)}`);
     return res.ok;
   } catch (e) {
     log('Bark 推送失败: ' + (e && e.message));
@@ -285,7 +292,6 @@ async function pushBark(title, body, link) {
   }
 }
 
-/** PushPlus：推到微信，需实名才有 200 条/天额度 */
 async function pushPushPlus(title, body, link) {
   if (!PUSHPLUS) return false;
   try {
@@ -308,7 +314,6 @@ async function pushPushPlus(title, body, link) {
   }
 }
 
-/** 飞书自定义机器人 */
 async function pushFeishu(title, body, link) {
   if (!FEISHU) return false;
   try {
@@ -318,7 +323,7 @@ async function pushFeishu(title, body, link) {
       body: JSON.stringify({ msg_type: 'text', content: { text: `${title}\n${body}\n原帖：${link}` } }),
     });
     const txt = await res.text();
-    log(`飞书响应 ${res.status}: ${txt.slice(0, 150)}`);
+    log(`飞书响应 ${res.status}: ${txt.slice(0, 120)}`);
     return res.ok;
   } catch (e) {
     log('飞书推送失败: ' + (e && e.message));
@@ -346,98 +351,118 @@ async function pushServerChan(title, body) {
 }
 
 async function pushAll(title, body, link, plain) {
-  const results = [];
-  results.push(await pushNtfy(title, body, link));
-  results.push(await pushBark(title, body, link));
-  results.push(await pushPushPlus(title, body, link));
-  results.push(await pushFeishu(title, body, link));
+  const r = [];
+  r.push(await pushPushPlus(title, body, link));
+  r.push(await pushNtfy(title, body, link));
+  r.push(await pushBark(title, body, link));
+  r.push(await pushFeishu(title, body, link));
   await pushWecom(title, body, link);
   await pushServerChan(title, plain || body);
-  return results.some(Boolean);
+  return r.some(Boolean);
 }
 
-async function notifyNewPost(post) {
-  const title = `${NAME} 发新帖了`;
+async function notifyNewPost(target, post) {
+  const title = `${target.name} 发新帖了`;
   const snippet = post.text.slice(0, 120) || '（图片/无文字内容）';
   const body = `${fmtTime(post.ctime)}｜赞${post.like} 评${post.comment}｜${snippet}`;
-  log(`推送：${title} / ${body.slice(0, 60)}…`);
+  log(`推送：${title} / ${body.slice(0, 50)}…`);
   return pushAll(title, body, post.url, snippet + '\n' + post.url);
 }
 
-/* ------------------------------ 主流程 ------------------------------ */
+/* ============================== 主流程 ============================== */
+
+function targetState(state, code) {
+  if (!state.targets[code]) state.targets[code] = { seenIds: null, failCount: 0 };
+  return state.targets[code];
+}
+
+async function checkTarget(cookie, state, target) {
+  const st = targetState(state, target.code);
+  try {
+    const posts = await fetchPosts(cookie, target);
+    if (!posts.length) throw new Error('没有拿到任何帖子');
+
+    const seen = new Set(st.seenIds || []);
+    const initialized = Array.isArray(st.seenIds);
+    const fresh = posts.filter((p) => !seen.has(p.id));
+
+    if (!initialized) {
+      st.seenIds = posts.map((p) => p.id).slice(-200);
+      st.failCount = 0;
+      st.lastCheckAt = Date.now();
+      log(`[${target.name}] 初始化完成，当前最新 ${posts[posts.length - 1].id}，之后有新帖推送`);
+      return { ok: true, fresh: 0 };
+    }
+
+    if (!fresh.length) {
+      st.failCount = 0;
+      st.lastCheckAt = Date.now();
+      log(`[${target.name}] 无新帖`);
+      return { ok: true, fresh: 0 };
+    }
+
+    for (const p of fresh) {
+      log(`[${target.name}] 发现新帖 ${p.id} [${fmtTime(p.ctime)}] ${p.text.slice(0, 40)}`);
+      await notifyNewPost(target, p);
+      seen.add(p.id);
+    }
+    st.seenIds = [...seen].slice(-200);
+    st.failCount = 0;
+    st.lastCheckAt = Date.now();
+    return { ok: true, fresh: fresh.length };
+  } catch (e) {
+    st.failCount = (st.failCount || 0) + 1;
+    st.lastError = String((e && e.message) || e);
+    log(`[${target.name}] 检查失败(${st.failCount}): ${st.lastError}`);
+    if (st.failCount === 3 || st.failCount % 30 === 0) {
+      await pushAll(
+        `${target.name} 监控异常`,
+        `连续 ${st.failCount} 次检查失败：${st.lastError}`,
+        'https://github.com/' + (process.env.GITHUB_REPOSITORY || ''),
+      );
+    }
+    return { ok: false, fresh: 0, failCount: st.failCount };
+  }
+}
 
 async function main() {
   const test = process.argv.includes('--test');
   const state = loadState();
-  const hasChannel = NTFY_URL || BARK_URL || PUSHPLUS || FEISHU || WECOM || SERVERCHAN;
+  const hasChannel = PUSHPLUS || NTFY_URL || BARK_URL || FEISHU || WECOM || SERVERCHAN;
 
   if (test) {
     if (!hasChannel) {
-      console.error('一个推送渠道都没配置：NTFY_URL / BARK_URL / PUSHPLUS_TOKEN / FEISHU_WEBHOOK / WECOM_WEBHOOK');
+      console.error('一个推送渠道都没配置');
       process.exit(1);
     }
     const ok = await pushAll(
-      `${NAME} 监控测试`,
-      '这是一条测试推送。真实推送会带发帖时间、点赞评论数和正文摘要，点开直达原帖。',
-      'https://t.10jqka.com.cn/lgt/user_page/?user_code=' + encodeURIComponent(USER_CODE),
+      '同花顺监控测试',
+      '这是一条测试推送。真实推送会带博主名、发帖时间、点赞评论数和正文摘要，点开直达原帖。',
+      'https://t.10jqka.com.cn/lgt/user_page/?user_code=' + encodeURIComponent(TARGETS[0].code),
     );
-    console.log(ok ? '测试推送完成，检查手机' : '测试推送失败，检查配置的推送地址');
+    console.log(ok ? '测试推送完成，检查手机' : '测试推送失败');
     process.exit(ok ? 0 : 1);
   }
 
+  let cookie;
   try {
-    const cookie = await getCookie();
-    const posts = await fetchPosts(cookie);
-    if (!posts.length) throw new Error('没有拿到任何帖子');
-
-    const latest = posts[posts.length - 1];
-    const seen = new Set(state.seenIds || []);
-    const initialized = Array.isArray(state.seenIds);
-    const fresh = posts.filter((p) => !seen.has(p.id));
-
-    if (!initialized) {
-      state.seenIds = posts.map((p) => p.id).slice(-200);
-      state.initializedAt = Date.now();
-      state.failCount = 0;
-      saveState(state);
-      log(`初始化完成，当前最新 ${latest.id} [${fmtTime(latest.ctime)}]，之后有新帖会推送`);
-      log('（首次运行不推送旧帖；想验证推送链路，用 workflow_dispatch 勾 test）');
-      return;
-    }
-
-    if (!fresh.length) {
-      state.failCount = 0;
-      state.lastCheckAt = Date.now();
-      saveState(state);
-      log(`无新帖（最新 ${latest.id} [${fmtTime(latest.ctime)}]）`);
-      return;
-    }
-
-    for (const p of fresh) {
-      log(`发现新帖 ${p.id} [${fmtTime(p.ctime)}] ${p.text.slice(0, 60)}`);
-      await notifyNewPost(p);
-      seen.add(p.id);
-    }
-    state.seenIds = [...seen].slice(-200);
-    state.failCount = 0;
-    state.lastCheckAt = Date.now();
-    state.lastNotifyAt = Date.now();
-    saveState(state);
+    cookie = await getCookie();
   } catch (e) {
-    state.failCount = (state.failCount || 0) + 1;
-    state.lastError = String((e && e.message) || e);
-    saveState(state);
-    log(`检查失败(${state.failCount}): ${state.lastError}`);
-
-    if (state.failCount === 3 || state.failCount % 30 === 0) {
-      await pushAll(
-        `${NAME} 监控异常`,
-        `连续 ${state.failCount} 次检查失败：${state.lastError}。可能是同花顺改版或风控加强。`,
-        'https://github.com/' + (process.env.GITHUB_REPOSITORY || ''),
-      );
-    }
-    process.exit(state.failCount >= 3 ? 1 : 0);
+    log('获取令牌失败: ' + (e && e.message));
+    process.exit(1);
   }
+
+  let worst = 0;
+  let totalFresh = 0;
+  for (const t of TARGETS) {
+    const r = await checkTarget(cookie, state, t);
+    totalFresh += r.fresh;
+    if (r.failCount) worst = Math.max(worst, r.failCount);
+    await sleep(800); // 博主之间稍微错开，别把接口打急了
+  }
+  saveState(state);
+  log(`本轮结束：${TARGETS.length} 个博主，新帖 ${totalFresh} 条`);
+  process.exit(worst >= 3 ? 1 : 0);
 }
 
 main().catch((e) => {
