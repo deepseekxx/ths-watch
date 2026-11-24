@@ -2,7 +2,7 @@ name: 同花顺发帖监控
 
 on:
   schedule:
-    # GitHub 的定时任务是 UTC 时间，*/10 = 每 5 分钟一次（实际可能延迟 5~15 分钟，属正常）
+    # GitHub 的定时任务是 UTC 时间，*/5 = 每 5 分钟一次（实际可能延迟 5~15 分钟，属正常）
     - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
