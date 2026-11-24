@@ -26,8 +26,8 @@ const STATE_PATH = path.resolve(__dirname, '..', 'state.json');
 /* ======================= 要监控的博主（改这里） ======================= */
 const TARGETS = [
   { name: '重生之散户一哥', code: '1179giyc4jr06d6785e69e' },
-  { name: 'G界红猫', code: '' }, // 待填 user_code
-  { name: '77超帅', code: '' }, // 待填 user_code
+  { name: 'G界红猫', code: 'zut394ud2p34z9e54dce1' },
+  { name: '77超帅', code: '119u3kf83bfi7i09f7d058' },
 ].filter((t) => t.code);
 
 /* ============================== 配置 ============================== */
