@@ -26,7 +26,8 @@ const os = require('os');
 const { spawn } = require('child_process');
 
 const ROOT = __dirname;
-const STATE_PATH = path.join(ROOT, 'state.json');
+// 已读记录放在仓库根目录，和 workflow 里 actions/cache 的 path 保持一致
+const STATE_PATH = path.resolve(__dirname, '..', 'state.json');
 const API = 'https://t.10jqka.com.cn/user_center/open/api/content/v2/get_by_uid';
 
 const USER_CODE = process.env.USER_CODE || '1179giyc4jr06d6785e69e';
