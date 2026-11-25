@@ -127,6 +127,20 @@ async function httpJson(url, method = 'GET') {
 /* ======================= 用无头 Chrome 取风控令牌 ======================= */
 
 async function getCookie() {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await getCookieOnce();
+    } catch (e) {
+      lastErr = e;
+      log(`取令牌失败(第 ${attempt} 次): ${(e && e.message) || e}`);
+      if (attempt < 3) await sleep(3000);
+    }
+  }
+  throw new Error('多次尝试后仍拿不到令牌: ' + ((lastErr && lastErr.message) || lastErr));
+}
+
+async function getCookieOnce() {
   const chrome = findChrome();
   if (!chrome) throw new Error('找不到 Chrome，无法获取同花顺令牌');
 
@@ -189,7 +203,8 @@ async function getCookie() {
       });
 
     await send('Runtime.enable');
-    for (let i = 0; i < 25; i++) {
+    await send('Page.enable');
+    for (let i = 0; i < 40; i++) {
       await sleep(700);
       const r = await send('Runtime.evaluate', { expression: 'document.cookie', returnByValue: true });
       const cookie = (r && r.result && r.result.result && r.result.result.value) || '';
@@ -197,6 +212,8 @@ async function getCookie() {
         log('已获取同花顺令牌');
         return cookie;
       }
+      // 页面没起来就重载一次（网络抖动时常见）
+      if (i === 12) await send('Page.navigate', { url: pageUrl }).catch(() => {});
     }
     throw new Error('等待令牌超时');
   } finally {
@@ -401,10 +418,26 @@ async function checkTarget(cookie, state, target) {
       return { ok: true, fresh: 0 };
     }
 
-    for (const p of fresh) {
-      log(`[${target.name}] 发现新帖 ${p.id} [${fmtTime(p.ctime)}] ${p.text.slice(0, 40)}`);
-      await notifyNewPost(target, p);
-      seen.add(p.id);
+    // 一次性积压太多（比如定时任务延迟了几个小时），合并成一条，避免刷屏
+    if (fresh.length > 3) {
+      const latest = fresh[fresh.length - 1];
+      log(`[${target.name}] 积压 ${fresh.length} 条，合并推送（最新 ${latest.id}）`);
+      await pushAll(
+        `${target.name}：错过 ${fresh.length} 条`,
+        `最新一条 ${fmtTime(latest.ctime)}｜${latest.text.slice(0, 100)}`,
+        latest.url,
+        `${target.name} 在你没盯着的这段时间发了 ${fresh.length} 条，最新：\n${latest.text.slice(
+          0,
+          150,
+        )}\n${latest.url}`,
+      );
+      fresh.forEach((p) => seen.add(p.id));
+    } else {
+      for (const p of fresh) {
+        log(`[${target.name}] 发现新帖 ${p.id} [${fmtTime(p.ctime)}] ${p.text.slice(0, 40)}`);
+        await notifyNewPost(target, p);
+        seen.add(p.id);
+      }
     }
     st.seenIds = [...seen].slice(-200);
     st.failCount = 0;
