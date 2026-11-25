@@ -105,6 +105,20 @@ function fmtTime(ms) {
   return `${d.getUTCMonth() + 1}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
 }
 
+/* 只在「周一至周五 09:00-15:00（北京时间）」推送；其余时间只静默同步，不发消息 */
+const PUSH_START_HOUR = Number(process.env.PUSH_START_HOUR || 9);
+const PUSH_END_HOUR = Number(process.env.PUSH_END_HOUR || 15);
+
+function bjParts(ts = Date.now()) {
+  const d = new Date(Number(ts) + 8 * 3600 * 1000);
+  return { day: d.getUTCDay(), hour: d.getUTCHours(), minute: d.getUTCMinutes() };
+}
+
+function inPushWindow(ts = Date.now()) {
+  const { day, hour } = bjParts(ts);
+  return day >= 1 && day <= 5 && hour >= PUSH_START_HOUR && hour < PUSH_END_HOUR;
+}
+
 function findChrome() {
   for (const p of CHROME_CANDIDATES) {
     try {
@@ -393,7 +407,8 @@ function targetState(state, code) {
   return state.targets[code];
 }
 
-async function checkTarget(cookie, state, target) {
+async function checkTarget(cookie, state, target, opts = {}) {
+  const push = opts.push !== false;
   const st = targetState(state, target.code);
   try {
     const posts = await fetchPosts(cookie, target);
@@ -418,7 +433,17 @@ async function checkTarget(cookie, state, target) {
       return { ok: true, fresh: 0 };
     }
 
-    // 一次性积压太多（比如定时任务延迟了几个小时），合并成一条，避免刷屏
+    if (!push) {
+      // 非推送时段：只记下来，不发消息
+      fresh.forEach((p) => seen.add(p.id));
+      st.seenIds = [...seen].slice(-200);
+      st.failCount = 0;
+      st.lastCheckAt = Date.now();
+      log(`[${target.name}] 非推送时段，静默同步 ${fresh.length} 条`);
+      return { ok: true, fresh: 0 };
+    }
+
+    // 一次性积压太多（比如刚恢复），合并成一条，避免刷屏
     if (fresh.length > 3) {
       const latest = fresh[fresh.length - 1];
       log(`[${target.name}] 积压 ${fresh.length} 条，合并推送（最新 ${latest.id}）`);
@@ -447,7 +472,8 @@ async function checkTarget(cookie, state, target) {
     st.failCount = (st.failCount || 0) + 1;
     st.lastError = String((e && e.message) || e);
     log(`[${target.name}] 检查失败(${st.failCount}): ${st.lastError}`);
-    if (st.failCount === 3 || st.failCount % 30 === 0) {
+    if (st.failCount >= 3 && push && Date.now() - (st.lastAlertAt || 0) > 6 * 3600 * 1000) {
+      st.lastAlertAt = Date.now();
       await pushAll(
         `${target.name} 监控异常`,
         `连续 ${st.failCount} 次检查失败：${st.lastError}`,
@@ -505,7 +531,11 @@ async function main() {
   const intervalSec = Math.max(60, Number(process.env.CHECK_INTERVAL_SECONDS || 300));
   const loop = process.env.LOOP_MODE !== 'false';
   const maxMinutes = Number(process.env.MAX_RUNTIME_MINUTES || 290);
+  const offHoursSec = Math.max(intervalSec, Number(process.env.OFF_HOURS_INTERVAL_SECONDS || 1800));
   const started = Date.now();
+
+  // 刚启动（比如接力中断后恢复）时，先把现状静默同步一轮，避免把一堆旧帖当新帖推出去
+  let silentFirstRound = Date.now() - (state.lastRoundAt || 0) > 2 * 3600 * 1000;
 
   let cookie = null;
   let round = 0;
@@ -513,6 +543,9 @@ async function main() {
 
   for (;;) {
     round++;
+    const window = inPushWindow();
+    const push = window && !silentFirstRound;
+
     if (!cookie) {
       try {
         cookie = await getCookie();
@@ -525,27 +558,39 @@ async function main() {
       let totalFresh = 0;
       let invalid = false;
       for (const t of TARGETS) {
-        const r = await checkTarget(cookie, state, t);
+        const r = await checkTarget(cookie, state, t, { push });
         totalFresh += r.fresh;
         if (r.failCount) worst = Math.max(worst, r.failCount);
         if (r.cookieInvalid) invalid = true;
         await sleep(800); // 博主之间稍微错开，别把接口打急了
       }
+      state.lastRoundAt = Date.now();
       saveState(state);
-      log(`第 ${round} 轮：${TARGETS.length} 个博主，新帖 ${totalFresh} 条`);
+      log(
+        `第 ${round} 轮：${TARGETS.length} 个博主，新帖 ${totalFresh} 条` +
+          (push ? '（推送时段）' : '（静默）'),
+      );
       if (invalid) cookie = null;
     }
 
     if (!loop) break;
+    if (silentFirstRound) silentFirstRound = false;
+
     if (Date.now() - started > maxMinutes * 60 * 1000) {
       log(`已跑满 ${maxMinutes} 分钟，接力下一棒`);
       await dispatchNext();
       break;
     }
-    await sleep(intervalSec * 1000);
+
+    // 推送时段内每 5 分钟查一次；其余时间 30 分钟查一次，只静默同步
+    await sleep(inWindowCheck(inPushWindow, offHoursSec, intervalSec));
   }
 
   process.exit(worst >= 3 ? 1 : 0);
+}
+
+function inWindowCheck(fn, offSec, onSec) {
+  return (fn() ? onSec : offSec) * 1000;
 }
 
 main().catch((e) => {
