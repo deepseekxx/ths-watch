@@ -433,32 +433,38 @@ async function checkTarget(cookie, state, target, opts = {}) {
       return { ok: true, fresh: 0 };
     }
 
-    if (!push) {
-      // 非推送时段：只记下来，不发消息
-      fresh.forEach((p) => seen.add(p.id));
+    // 推送时段内正常推；刚过 15:00 的 20 分钟宽限期也推，避免 14:58 发的帖被漏掉
+    const grace = 20 * 60 * 1000;
+    const toPush = fresh.filter((p) => push || (inPushWindow(p.ctime) && Date.now() - p.ctime < grace));
+    const silentOnes = fresh.filter((p) => !toPush.includes(p));
+
+    if (silentOnes.length) {
+      silentOnes.forEach((p) => seen.add(p.id));
+      log(`[${target.name}] 非推送时段，静默同步 ${silentOnes.length} 条`);
+    }
+    if (!toPush.length) {
       st.seenIds = [...seen].slice(-200);
       st.failCount = 0;
       st.lastCheckAt = Date.now();
-      log(`[${target.name}] 非推送时段，静默同步 ${fresh.length} 条`);
       return { ok: true, fresh: 0 };
     }
 
     // 一次性积压太多（比如刚恢复），合并成一条，避免刷屏
-    if (fresh.length > 3) {
-      const latest = fresh[fresh.length - 1];
-      log(`[${target.name}] 积压 ${fresh.length} 条，合并推送（最新 ${latest.id}）`);
+    if (toPush.length > 3) {
+      const latest = toPush[toPush.length - 1];
+      log(`[${target.name}] 积压 ${toPush.length} 条，合并推送（最新 ${latest.id}）`);
       await pushAll(
-        `${target.name}：错过 ${fresh.length} 条`,
+        `${target.name}：错过 ${toPush.length} 条`,
         `最新一条 ${fmtTime(latest.ctime)}｜${latest.text.slice(0, 100)}`,
         latest.url,
-        `${target.name} 在你没盯着的这段时间发了 ${fresh.length} 条，最新：\n${latest.text.slice(
+        `${target.name} 在你没盯着的这段时间发了 ${toPush.length} 条，最新：\n${latest.text.slice(
           0,
           150,
         )}\n${latest.url}`,
       );
-      fresh.forEach((p) => seen.add(p.id));
+      toPush.forEach((p) => seen.add(p.id));
     } else {
-      for (const p of fresh) {
+      for (const p of toPush) {
         log(`[${target.name}] 发现新帖 ${p.id} [${fmtTime(p.ctime)}] ${p.text.slice(0, 40)}`);
         await notifyNewPost(target, p);
         seen.add(p.id);
@@ -467,7 +473,7 @@ async function checkTarget(cookie, state, target, opts = {}) {
     st.seenIds = [...seen].slice(-200);
     st.failCount = 0;
     st.lastCheckAt = Date.now();
-    return { ok: true, fresh: fresh.length };
+    return { ok: true, fresh: toPush.length };
   } catch (e) {
     st.failCount = (st.failCount || 0) + 1;
     st.lastError = String((e && e.message) || e);
