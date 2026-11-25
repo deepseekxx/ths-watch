@@ -1,18 +1,22 @@
 name: 同花顺发帖监控
 
+# 说明：
+# - 主链路是「长驻接力」：一次运行 5 小时，每 5 分钟检查一轮，快结束时自动派发下一次运行，
+#   这样不依赖 GitHub 那个出了名不靠谱的定时器。
+# - 下面的 schedule 只是兜底看门狗：万一接力断了，最多 15 分钟内会被它拉起来。
 on:
   schedule:
-    # GitHub 的定时任务是 UTC 时间，*/5 = 每 5 分钟一次（实际可能延迟 5~15 分钟，属正常）
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       test:
-        description: '只发一条测试推送到手机（验证 Bark 是否配好）'
+        description: '只发一条测试推送到手机'
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
+  actions: write # 允许自己派发下一次运行（接力）
 
 concurrency:
   group: ths-watch
@@ -21,7 +25,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 330
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
@@ -45,16 +49,20 @@ jobs:
         with:
           chrome-version: stable
 
-      - name: 检查新帖
+      - name: 持续检查
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           NTFY_URL: ${{ secrets.NTFY_URL }}
           BARK_URL: ${{ secrets.BARK_URL }}
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
-          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           TEST_MODE: ${{ inputs.test }}
+          CHECK_INTERVAL_SECONDS: '300'
+          MAX_RUNTIME_MINUTES: '290'
+          LOOP_MODE: 'true'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           CHROME_BIN="${CHROME_PATH:-}"
@@ -63,7 +71,6 @@ jobs:
           fi
           if [ -z "$CHROME_BIN" ]; then echo "没有可用的 Chrome"; exit 1; fi
           echo "Chrome: $CHROME_BIN"
-          echo "Bark 配置长度: ${#BARK_URL}"
           export CHROME_PATH="$CHROME_BIN"
           if [ "$TEST_MODE" = "true" ]; then
             node scripts/ths-watch-ci.js --test
