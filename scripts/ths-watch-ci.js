@@ -454,7 +454,32 @@ async function checkTarget(cookie, state, target) {
         'https://github.com/' + (process.env.GITHUB_REPOSITORY || ''),
       );
     }
-    return { ok: false, fresh: 0, failCount: st.failCount };
+    return { ok: false, fresh: 0, failCount: st.failCount, cookieInvalid: /403|令牌|登录/.test(st.lastError) };
+  }
+}
+
+/** 长驻模式下，快到 6 小时上限时派发下一次运行，接力跑下去 */
+async function dispatchNext() {
+  const token = process.env.GITHUB_TOKEN;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!token || !repo) {
+    log('没有 GITHUB_TOKEN，跳过自动续跑（本地运行时会这样，正常）');
+    return;
+  }
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/ths-watch.yml/dispatches`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'ths-watch',
+      },
+      body: JSON.stringify({ ref: 'main', inputs: { test: false } }),
+    });
+    log(`已派发下一棒: HTTP ${res.status}`);
+  } catch (e) {
+    log('派发下一棒失败: ' + (e && e.message));
   }
 }
 
@@ -477,24 +502,49 @@ async function main() {
     process.exit(ok ? 0 : 1);
   }
 
-  let cookie;
-  try {
-    cookie = await getCookie();
-  } catch (e) {
-    log('获取令牌失败: ' + (e && e.message));
-    process.exit(1);
+  const intervalSec = Math.max(60, Number(process.env.CHECK_INTERVAL_SECONDS || 300));
+  const loop = process.env.LOOP_MODE !== 'false';
+  const maxMinutes = Number(process.env.MAX_RUNTIME_MINUTES || 290);
+  const started = Date.now();
+
+  let cookie = null;
+  let round = 0;
+  let worst = 0;
+
+  for (;;) {
+    round++;
+    if (!cookie) {
+      try {
+        cookie = await getCookie();
+      } catch (e) {
+        log('获取令牌失败: ' + (e && e.message));
+      }
+    }
+
+    if (cookie) {
+      let totalFresh = 0;
+      let invalid = false;
+      for (const t of TARGETS) {
+        const r = await checkTarget(cookie, state, t);
+        totalFresh += r.fresh;
+        if (r.failCount) worst = Math.max(worst, r.failCount);
+        if (r.cookieInvalid) invalid = true;
+        await sleep(800); // 博主之间稍微错开，别把接口打急了
+      }
+      saveState(state);
+      log(`第 ${round} 轮：${TARGETS.length} 个博主，新帖 ${totalFresh} 条`);
+      if (invalid) cookie = null;
+    }
+
+    if (!loop) break;
+    if (Date.now() - started > maxMinutes * 60 * 1000) {
+      log(`已跑满 ${maxMinutes} 分钟，接力下一棒`);
+      await dispatchNext();
+      break;
+    }
+    await sleep(intervalSec * 1000);
   }
 
-  let worst = 0;
-  let totalFresh = 0;
-  for (const t of TARGETS) {
-    const r = await checkTarget(cookie, state, t);
-    totalFresh += r.fresh;
-    if (r.failCount) worst = Math.max(worst, r.failCount);
-    await sleep(800); // 博主之间稍微错开，别把接口打急了
-  }
-  saveState(state);
-  log(`本轮结束：${TARGETS.length} 个博主，新帖 ${totalFresh} 条`);
   process.exit(worst >= 3 ? 1 : 0);
 }
 
